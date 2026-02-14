@@ -1,4 +1,5 @@
 #include <api/api.hpp>
+#include <helpers/utils.hpp>
 
 namespace wolf::api {
 
@@ -19,6 +20,7 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                                    immer::box<state::AppState> app_state) {
 
   state_ = std::make_shared<UnixSocketState>(io_context, app_state, socket_path);
+  const bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
 
   state_->http.add(HTTPMethod::GET,
                    "/api/v1/events",
@@ -123,37 +125,39 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
    * Profiles API
    */
 
-  state_->http.add(HTTPMethod::GET,
-                   "/api/v1/profiles",
-                   {
-                       .summary = "Get all profiles",
-                       .description = "This endpoint returns a list of all profiles.",
-                       .response_description = {{200, {.json_schema = rfl::json::to_schema<ProfileListResponse>()}}},
-                       .handler = [this](auto req, auto socket) { endpoint_Profiles(req, socket); },
-                   });
+    if (!dillinger_mode) {
+    state_->http.add(HTTPMethod::GET,
+             "/api/v1/profiles",
+             {
+               .summary = "Get all profiles",
+               .description = "This endpoint returns a list of all profiles.",
+               .response_description = {{200, {.json_schema = rfl::json::to_schema<ProfileListResponse>()}}},
+               .handler = [this](auto req, auto socket) { endpoint_Profiles(req, socket); },
+             });
 
-  state_->http.add(
+    state_->http.add(
       HTTPMethod::POST,
       "/api/v1/profiles/add",
       {
-          .summary = "Create a new profile",
-          .request_description =
-              APIDescription{.json_schema = rfl::json::to_schema<rfl::Reflector<events::Profile>::ReflType>()},
-          .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
-                                   {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
-          .handler = [this](auto req, auto socket) { endpoint_AddProfile(req, socket); },
+        .summary = "Create a new profile",
+        .request_description =
+          APIDescription{.json_schema = rfl::json::to_schema<rfl::Reflector<events::Profile>::ReflType>()},
+        .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+        .handler = [this](auto req, auto socket) { endpoint_AddProfile(req, socket); },
       });
 
-  state_->http.add(
+    state_->http.add(
       HTTPMethod::POST,
       "/api/v1/profiles/remove",
       {
-          .summary = "Remove a profile",
-          .request_description = APIDescription{.json_schema = rfl::json::to_schema<ProfileRemoveRequest>()},
-          .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
-                                   {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
-          .handler = [this](auto req, auto socket) { endpoint_RemoveProfile(req, socket); },
+        .summary = "Remove a profile",
+        .request_description = APIDescription{.json_schema = rfl::json::to_schema<ProfileRemoveRequest>()},
+        .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+        .handler = [this](auto req, auto socket) { endpoint_RemoveProfile(req, socket); },
       });
+    }
 
   /**
    * Stream session API
@@ -300,25 +304,6 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                     .description = "Get the icon for a given app, pass the icon_path as a query parameter ex: "
                                    "/api/v1/utils/get-icon?icon_path=/etc/wolf/icons/steam.png",
                     .handler = [this](auto req, auto socket) { endpoint_GetIcon(req, socket); }});
-
-  state_->http.add(
-      HTTPMethod::GET,
-      "/api/v1/docker/images/inspect",
-      {.summary = "Inspect a Docker image",
-       .description = "Inspect a Docker image and returns the full JSON response as is from the Docker APIs at "
-                      "/images/{image_name}/json expects image_name as a query parameter.",
-       .handler = [this](auto req, auto socket) { endpoint_DockerInspectImage(req, socket); }});
-
-  state_->http.add(
-      HTTPMethod::POST,
-      "/api/v1/docker/images/pull",
-      {.summary = "Pull a Docker image",
-       .description = "Pull a Docker image, will keep the connection open to send back progress updates. Each "
-                      "progress event will be a single line encoded as JSON.",
-       .request_description = APIDescription{.json_schema = rfl::json::to_schema<DockerPullImageRequest>()},
-       .response_description = {{200, {.json_schema = rfl::json::to_schema<DockerPullImageResponse>()}},
-                                {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
-       .handler = [this](auto req, auto socket) { endpoint_DockerPullImage(req, socket); }});
 
   /**
    * OpenAPI schema

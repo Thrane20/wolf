@@ -175,8 +175,27 @@ void run_control(int port,
         case ENET_EVENT_TYPE_DISCONNECT:
           logs::log(logs::debug, "[ENET] disconnected client: {}:{}", client_ip, client_port);
           connected_clients.update([peer = event.peer](const enet_clients_map &m) { return m.erase(peer); });
-          event_bus->fire_event(
-              immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+          // Only pause the stream when the *last* client disconnects.
+          // If multiple clients are connected to the same session (e.g. desktop + iPad),
+          // pausing on any disconnect tears down the pipelines and Moonlight shows "Paused"
+          // for the remaining clients.
+          {
+            std::size_t remaining_for_session = 0;
+            for (auto &[peer, session] : *connected_clients.load()) {
+              if (session->session_id == client_session->session_id) {
+                remaining_for_session++;
+              }
+            }
+            if (remaining_for_session == 0) {
+              event_bus->fire_event(
+                  immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+            } else {
+              logs::log(logs::debug,
+                        "[ENET] Not pausing stream {}; {} client(s) still connected",
+                        client_session->session_id,
+                        remaining_for_session);
+            }
+          }
           break;
         case ENET_EVENT_TYPE_RECEIVE:
           enet_packet packet = {event.packet, enet_packet_destroy};
@@ -203,8 +222,19 @@ void run_control(int port,
                         crypto::str_to_hex(decrypted));
 
               if (sub_type == TERMINATION) {
-                event_bus->fire_event(
-                    immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+                // Treat termination as a per-client disconnect. Only pause when this is the last
+                // connected client for the session.
+                std::size_t connected_for_session = 0;
+                for (auto &[peer, session] : *connected_clients.load()) {
+                  if (session->session_id == client_session->session_id) {
+                    connected_for_session++;
+                  }
+                }
+
+                if (connected_for_session <= 1) {
+                  event_bus->fire_event(
+                      immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+                }
               } else if (sub_type == INPUT_DATA) {
                 immer::box<std::shared_ptr<ENetPeer>> enet_client = {to_shared_ptr(event.peer)};
                 handle_input(client_session.value(), enet_client, (INPUT_PKT *)decrypted.data());

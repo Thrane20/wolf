@@ -32,6 +32,10 @@ void start_runner(std::shared_ptr<events::Runner> runner,
   full_env.set("PULSE_SERVER", audio_server_name);
   mounted_paths.push_back({audio_server_on_host, audio_server_name});
 
+  for (const auto &env_var : args->extra_env) {
+    full_env.set(env_var.first, env_var.second);
+  }
+
   full_env.set("GAMESCOPE_WIDTH", std::to_string(args->video_settings.width));
   full_env.set("GAMESCOPE_HEIGHT", std::to_string(args->video_settings.height));
   full_env.set("GAMESCOPE_REFRESH", std::to_string(args->video_settings.refresh_rate));

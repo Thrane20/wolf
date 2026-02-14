@@ -1,7 +1,9 @@
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
+#include <helpers/utils.hpp>
 #include <sessions/common.hpp>
+#include <atomic>
 #include <sessions/handlers.hpp>
 #include <state/sessions.hpp>
 #include <streaming/streaming.hpp>
@@ -19,13 +21,17 @@ template <typename RTPPingType>
 immer::box<RTPPingType> wait_for_ping(std::shared_ptr<events::EventBusType> ev_bus, const auto &sess) {
   auto ping_promise = std::make_shared<std::promise<RTPPingType>>();
   auto ping_future = ping_promise->get_future();
+  auto ping_set = std::make_shared<std::atomic_bool>(false);
 
   auto handler =
-      ev_bus->register_handler<immer::box<RTPPingType>>([sess, ping_promise](const immer::box<RTPPingType> &ping_ev) {
+      ev_bus->register_handler<immer::box<RTPPingType>>([sess, ping_promise, ping_set](const immer::box<RTPPingType> &ping_ev) {
         // Check if this ping is for our session
         if (sess->rtp_secret_payload == ping_ev->payload || // Secret payload matching
             (!ping_ev->payload.has_value() && ping_ev->client_ip == sess->client_ip &&
              ping_ev->client_port == sess->port)) { // Legacy IP+port matching when no payload has been passed
+          if (ping_set->exchange(true)) {
+            return;
+          }
           // Resolve the promise with the ping event data
           ping_promise->set_value(*ping_ev);
         }
@@ -169,8 +175,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
 
           logs::log(logs::debug, "[STREAM_SESSION] Start runner");
+            bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
           session->event_bus->fire_event(immer::box<events::StartRunner>(
-              events::StartRunner{.stop_stream_when_over = true,
+              events::StartRunner{.stop_stream_when_over = !dillinger_mode,
                                   .runner = session->app->runner,
                                   .stream_session = std::make_shared<events::StreamSession>(*session)}));
         });
@@ -185,6 +192,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           logs::log(logs::warning, "No devices queue found for session {}", session_id);
           return;
         }
+
+        app_state->event_bus->fire_event(immer::box<events::StopRunnerEvent>(
+            events::StopRunnerEvent{.session_id = run_session->stream_session->session_id}));
 
         std::thread([=]() {
           start_runner(
@@ -208,7 +218,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                   .app_local_state_folder = run_session->stream_session->app_local_state_folder,
                   .app_host_state_folder = run_session->stream_session->app_host_state_folder,
                   .xdg_runtime_dir = runtime_dir,
-                  .client_settings = run_session->stream_session->client_settings}});
+                  .client_settings = run_session->stream_session->client_settings,
+                  .extra_env = run_session->extra_env}});
 
           // Runner process ended
           if (run_session->stop_stream_when_over) {

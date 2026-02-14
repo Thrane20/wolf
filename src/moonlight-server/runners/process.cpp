@@ -1,5 +1,7 @@
 #include <boost/asio/io_context.hpp>
+#include <chrono>
 #include <control/control.hpp>
+#include <csignal>
 #include <events/events.hpp>
 #include <future>
 #include <helpers/logger.hpp>
@@ -46,17 +48,45 @@ void RunProcess::run(std::string_view session_id,
     return;
   }
 
+  auto terminate_process = [&](std::string_view reason) {
+    if (!child_proc.running()) {
+      return;
+    }
+
+    logs::log(logs::info, "[PROCESS] Terminating process ({})", reason);
+    group_proc.terminate();
+
+    if (!child_proc.wait_for(std::chrono::seconds(3))) {
+      logs::log(logs::warning, "[PROCESS] Process did not exit after SIGTERM, sending SIGKILL");
+      ::kill(child_proc.id(), SIGKILL);
+    }
+  };
+
   auto terminate_handler = this->ev_bus->register_handler<immer::box<StopStreamEvent>>(
-      [&group_proc, session_id](const immer::box<StopStreamEvent> &terminate_ev) {
+      [&terminate_process, session_id](const immer::box<StopStreamEvent> &terminate_ev) {
         if (std::to_string(terminate_ev->session_id) == session_id) {
-          group_proc.terminate(); // Manually terminate the process
+          terminate_process("stop stream");
+        }
+      });
+
+  auto stop_runner_handler = this->ev_bus->register_handler<immer::box<StopRunnerEvent>>(
+      [&terminate_process, session_id](const immer::box<StopRunnerEvent> &terminate_ev) {
+        if (std::to_string(terminate_ev->session_id) == session_id) {
+          terminate_process("stop runner");
+        }
+      });
+
+  auto replace_runner_handler = this->ev_bus->register_handler<immer::box<StartRunner>>(
+      [&terminate_process, session_id](const immer::box<StartRunner> &start_ev) {
+        if (std::to_string(start_ev->stream_session->session_id) == session_id) {
+          terminate_process("runner replacement");
         }
       });
 
   auto terminate_lobby_handler = this->ev_bus->register_handler<immer::box<StopLobbyEvent>>(
-      [&group_proc, session_id](const immer::box<StopLobbyEvent> &terminate_ev) {
+      [&terminate_process, session_id](const immer::box<StopLobbyEvent> &terminate_ev) {
         if (terminate_ev->lobby_id == session_id) {
-          group_proc.terminate(); // Manually terminate the process
+          terminate_process("stop lobby");
         }
       });
 
@@ -74,6 +104,8 @@ void RunProcess::run(std::string_view session_id,
   }
 
   terminate_handler.unregister();
+  stop_runner_handler.unregister();
+  replace_runner_handler.unregister();
 }
 
 } // namespace process

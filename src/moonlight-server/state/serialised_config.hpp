@@ -70,17 +70,6 @@ struct AppCMD {
   std::string run_cmd;
 };
 
-struct AppDocker {
-  using Tag = rfl::Literal<"docker", "Docker">;
-  std::string name;
-  std::string image;
-  std::vector<std::string> mounts;
-  std::vector<std::string> env;
-  std::vector<std::string> devices;
-  std::vector<std::string> ports;
-  std::optional<std::string> base_create_json;
-};
-
 struct BaseAppVideoOverride {
   std::optional<std::string> source;
   std::optional<std::string> sink;
@@ -107,7 +96,7 @@ struct BaseApp {
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
   std::optional<bool> start_audio_server;
-  rfl::TaggedUnion<"type", AppCMD, AppDocker> runner =
+    rfl::TaggedUnion<"type", AppCMD> runner =
       AppCMD{}; // We have to provide a default or rfl::DefaultIfMissing will fail
 };
 

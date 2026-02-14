@@ -11,6 +11,7 @@
 #include <immer/vector_transient.hpp>
 #include <moonlight/control.hpp>
 #include <moonlight/protocol.hpp>
+#include <optional>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
 #include <rest/helpers.hpp>
@@ -64,6 +65,11 @@ void serverinfo(const std::shared_ptr<typename SimpleWeb::Server<T>::Response> &
   bool is_busy = stream_session.has_value();
   int app_id = stream_session.has_value() ? std::stoi(stream_session->app->base.id) : 0;
 
+  auto hostname = cfg->hostname;
+  if (std::string(utils::get_env("DILLINGER_MODE", "")) == "1") {
+    hostname = "Dillinger";
+  }
+
   auto local_ip = get_host_ip<T>(request, state);
 
   auto xml = moonlight::serverinfo(is_busy,
@@ -71,7 +77,7 @@ void serverinfo(const std::shared_ptr<typename SimpleWeb::Server<T>::Response> &
                                    get_port(state::HTTPS_PORT),
                                    get_port(state::HTTP_PORT),
                                    cfg->uuid,
-                                   cfg->hostname,
+                                   hostname,
                                    utils::lazy_value_or(host->mac_address, [&]() { return get_mac_address(local_ip); }),
                                    local_ip,
                                    host->display_modes,
@@ -327,11 +333,20 @@ void applist(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>:
              const immer::box<state::AppState> &state) {
   log_req<SimpleWeb::HTTPS>(request);
 
+  bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
+
   immer::vector<immer::box<events::App>> moonlight_apps =
       state::get_moonlight_profile(state->config).value()->apps->load();
   auto base_apps = moonlight_apps                                                        //
                    | ranges::views::transform([](const auto &app) { return app->base; }) //
                    | ranges::to<immer::vector<moonlight::App>>();
+  if (dillinger_mode) {
+    if (base_apps.empty()) {
+      base_apps = immer::vector<moonlight::App>{moonlight::App{"Dillinger", "0", false, std::nullopt}};
+    } else {
+      base_apps = immer::vector<moonlight::App>{base_apps.front()};
+    }
+  }
   auto xml = moonlight::applist(base_apps);
 
   send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
@@ -341,6 +356,11 @@ void appasset(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>
               const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Request> &request,
               const immer::box<state::AppState> &state) {
   log_req<SimpleWeb::HTTPS>(request);
+
+  if (std::string(utils::get_env("DILLINGER_MODE", "")) == "1") {
+    response->write(SimpleWeb::StatusCode::client_error_not_found, "asset not found");
+    return;
+  }
 
   SimpleWeb::CaseInsensitiveMultimap headers = request->parse_query_string();
   auto app_id = get_header(headers, "appid");

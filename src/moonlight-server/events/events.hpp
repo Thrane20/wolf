@@ -43,7 +43,7 @@ struct UnplugDeviceEvent {
 };
 
 using devices_atom_queue = TSQueue<immer::box<events::PlugDeviceEvent>>;
-using RunnerTypes = rfl::TaggedUnion<"type", wolf::config::AppCMD, wolf::config::AppDocker>;
+using RunnerTypes = rfl::TaggedUnion<"type", wolf::config::AppCMD>;
 
 struct Runner {
   virtual ~Runner() = default;
@@ -332,6 +332,11 @@ struct StartRunner {
   bool stop_stream_when_over = false;
   std::shared_ptr<Runner> runner;
   std::shared_ptr<StreamSession> stream_session;
+  immer::map<std::string, std::string> extra_env = {};
+};
+
+struct StopRunnerEvent {
+  std::size_t session_id;
 };
 
 using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
@@ -348,6 +353,7 @@ using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
                                                   immer::box<RTPVideoPingEvent>,
                                                   immer::box<RTPAudioPingEvent>,
                                                   immer::box<StartRunner>,
+                                                  immer::box<StopRunnerEvent>,
                                                   immer::box<JoinLobbyEvent>,
                                                   immer::box<LeaveLobbyEvent>,
                                                   immer::box<CreateLobbyEvent>,
@@ -369,6 +375,7 @@ using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,
                                    immer::box<StartRunner>,
+                                   immer::box<StopRunnerEvent>,
                                    immer::box<JoinLobbyEvent>,
                                    immer::box<LeaveLobbyEvent>,
                                    immer::box<CreateLobbyEvent>,
@@ -390,6 +397,7 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,
                                    immer::box<StartRunner>,
+                                   immer::box<StopRunnerEvent>,
                                    immer::box<JoinLobbyEvent>,
                                    immer::box<LeaveLobbyEvent>,
                                    immer::box<CreateLobbyEvent>,

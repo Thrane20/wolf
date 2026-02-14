@@ -2,6 +2,7 @@
 #include <events/events.hpp>
 #include <immer/atom.hpp>
 #include <immer/map_transient.hpp>
+#include <helpers/utils.hpp>
 #include <rest/endpoints.hpp>
 
 namespace HTTPServers {
@@ -22,6 +23,7 @@ using namespace wolf::core;
  * @return std::thread: the thread where this server will run
  */
 void startServer(HttpServer *server, const immer::box<state::AppState> state, int port) {
+  const bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
   server->config.port = port;
   server->config.address = "0.0.0.0";
   server->default_resource["GET"] = endpoints::not_found<SimpleWeb::HTTP>;
@@ -35,40 +37,42 @@ void startServer(HttpServer *server, const immer::box<state::AppState> state, in
 
   auto pairing_atom = state->pairing_atom;
 
-  server->resource["^/pin/$"]["GET"] = [](auto resp, auto req) { resp->write(pin_html); };
-  server->resource["^/pin/$"]["POST"] = [pairing_atom](auto resp, auto req) {
-    try {
-      bt::ptree pt;
+  if (!dillinger_mode) {
+    server->resource["^/pin/$"]["GET"] = [](auto resp, auto req) { resp->write(pin_html); };
+    server->resource["^/pin/$"]["POST"] = [pairing_atom](auto resp, auto req) {
+      try {
+        bt::ptree pt;
 
-      read_json(req->content, pt);
+        read_json(req->content, pt);
 
-      auto pin = pt.get<std::string>("pin");
-      auto secret = pt.get<std::string>("secret");
-      logs::log(logs::debug, "Received POST /pin/ pin:{} secret:{}", pin, secret);
+        auto pin = pt.get<std::string>("pin");
+        auto secret = pt.get<std::string>("secret");
+        logs::log(logs::debug, "Received POST /pin/ pin:{} secret:{}", pin, secret);
 
-      auto pair_request = pairing_atom->load()->at(secret);
-      pair_request->user_pin->set_value(pin);
-      resp->write("OK");
-      pairing_atom->update([&secret](auto m) { return m.erase(secret); });
-    } catch (const std::exception &e) {
-      *resp << "HTTP/1.1 400 Bad Request\r\nContent-Length: " << strlen(e.what()) << "\r\n\r\n" << e.what();
-    }
-  };
+        auto pair_request = pairing_atom->load()->at(secret);
+        pair_request->user_pin->set_value(pin);
+        resp->write("OK");
+        pairing_atom->update([&secret](auto m) { return m.erase(secret); });
+      } catch (const std::exception &e) {
+        *resp << "HTTP/1.1 400 Bad Request\r\nContent-Length: " << strlen(e.what()) << "\r\n\r\n" << e.what();
+      }
+    };
 
-  server->resource["^/unpair$"]["GET"] = [&state](auto resp, auto req) {
-    SimpleWeb::CaseInsensitiveMultimap headers = req->parse_query_string();
-    auto client_id = get_header(headers, "uniqueid");
-    auto client_ip = req->remote_endpoint().address().to_string();
-    auto cache_key = client_id.value() + "@" + client_ip;
+    server->resource["^/unpair$"]["GET"] = [&state](auto resp, auto req) {
+      SimpleWeb::CaseInsensitiveMultimap headers = req->parse_query_string();
+      auto client_id = get_header(headers, "uniqueid");
+      auto client_ip = req->remote_endpoint().address().to_string();
+      auto cache_key = client_id.value() + "@" + client_ip;
 
-    logs::log(logs::info, "Unpairing: {}", cache_key);
-    auto client = state->pairing_cache->load()->at(cache_key);
-    state::unpair(state->config, state::PairedClient{.client_cert = client.client_cert});
+      logs::log(logs::info, "Unpairing: {}", cache_key);
+      auto client = state->pairing_cache->load()->at(cache_key);
+      state::unpair(state->config, state::PairedClient{.client_cert = client.client_cert});
 
-    XML xml;
-    xml.put("root.<xmlattr>.status_code", 200);
-    send_xml<SimpleWeb::HTTP>(resp, SimpleWeb::StatusCode::success_ok, xml);
-  };
+      XML xml;
+      xml.put("root.<xmlattr>.status_code", 200);
+      send_xml<SimpleWeb::HTTP>(resp, SimpleWeb::StatusCode::success_ok, xml);
+    };
+  }
 
   auto pair_handler = state->event_bus->register_handler<immer::box<events::PairSignal>>(
       [pairing_atom](const immer::box<events::PairSignal> pair_sig) {
@@ -116,6 +120,7 @@ void reply_unauthorized(const std::shared_ptr<typename SimpleWeb::ServerBase<Sim
 }
 
 void startServer(HttpsServer *server, const immer::box<state::AppState> state, int port) {
+  const bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
   server->config.port = port;
   server->config.address = "0.0.0.0";
   server->default_resource["GET"] = endpoints::not_found<SimpleWeb::HTTPS>;
@@ -170,13 +175,15 @@ void startServer(HttpsServer *server, const immer::box<state::AppState> state, i
     }
   };
 
-  server->resource["^/appasset$"]["GET"] = [&state](auto resp, auto req) {
-    if (get_client_if_paired(state, req)) {
-      endpoints::https::appasset(resp, req, state);
-    } else {
-      reply_unauthorized(req, resp);
-    }
-  };
+  if (!dillinger_mode) {
+    server->resource["^/appasset$"]["GET"] = [&state](auto resp, auto req) {
+      if (get_client_if_paired(state, req)) {
+        endpoints::https::appasset(resp, req, state);
+      } else {
+        reply_unauthorized(req, resp);
+      }
+    };
+  }
 
   server->start([](unsigned short port) { logs::log(logs::info, "HTTPS server listening on port: {} ", port); });
 }

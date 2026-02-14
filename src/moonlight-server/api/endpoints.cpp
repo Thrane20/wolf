@@ -1,12 +1,16 @@
 #include <api/api.hpp>
 #include <control/input_handler.hpp>
-#include <core/docker.hpp>
+#include <helpers/utils.hpp>
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
 
 namespace wolf::api {
+
+static bool is_dillinger_mode() {
+  return std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
+}
 
 void UnixSocketServer::endpoint_Events(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   // curl -N --unix-socket /tmp/wolf.sock http://localhost/api/v1/events
@@ -152,6 +156,11 @@ void UnixSocketServer::endpoint_RemoveApp(const HTTPRequest &req, std::shared_pt
 }
 
 void UnixSocketServer::endpoint_Profiles(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  if (is_dillinger_mode()) {
+    auto res = GenericErrorResponse{.error = "Profiles API disabled in Dillinger mode"};
+    send_http(socket, 403, rfl::json::write(res));
+    return;
+  }
   auto profiles = state_->app_state->config->profiles->load().get();
   auto res = ProfileListResponse{.success = true,
                                  .profiles = profiles | //
@@ -164,6 +173,11 @@ void UnixSocketServer::endpoint_Profiles(const HTTPRequest &req, std::shared_ptr
 }
 
 void UnixSocketServer::endpoint_AddProfile(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  if (is_dillinger_mode()) {
+    auto res = GenericErrorResponse{.error = "Profiles API disabled in Dillinger mode"};
+    send_http(socket, 403, rfl::json::write(res));
+    return;
+  }
   auto profile_req = rfl::json::read<rfl::Reflector<events::Profile>::ReflType>(req.body);
   if (profile_req) {
     auto p = profile_req.value();
@@ -181,6 +195,11 @@ void UnixSocketServer::endpoint_AddProfile(const HTTPRequest &req, std::shared_p
 }
 
 void UnixSocketServer::endpoint_RemoveProfile(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  if (is_dillinger_mode()) {
+    auto res = GenericErrorResponse{.error = "Profiles API disabled in Dillinger mode"};
+    send_http(socket, 403, rfl::json::write(res));
+    return;
+  }
   auto profile_req = rfl::json::read<ProfileRemoveRequest>(req.body);
   if (profile_req) {
     auto p = profile_req.value();
@@ -601,58 +620,6 @@ void UnixSocketServer::endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<
       send_http(socket, 404, rfl::json::write(res));
     }
   }).detach();
-}
-
-void UnixSocketServer::endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
-  auto image_name = utils::split(req.query_string, '=');
-  if (image_name.size() != 2 || image_name[0] != "image_name") {
-    auto res = GenericErrorResponse{.error = "Invalid request format, expects 'image_name' as a query parameter"};
-    send_http(socket, 400, rfl::json::write(res));
-    return;
-  }
-
-  docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
-  if (auto response = docker_api.inspect_image(image_name[1])) {
-    send_http(socket, 200, response.value());
-  } else {
-    auto res = GenericErrorResponse{.error = "Image not found"};
-    send_http(socket, 404, rfl::json::write(res));
-  }
-}
-
-void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
-  auto input_payload = rfl::json::read<DockerPullImageRequest>(req.body);
-  if (input_payload) {
-    // TODO: implement coroutines for CURL
-    std::thread([this, socket, image = input_payload.value().image_name]() {
-      docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
-      bool first_send = true;
-      broadcast_event("DockerPullImageStartEvent",
-                      rfl::json::write(events::DockerPullImageStartEvent{.image_name = image}));
-      if (docker_api.pull_image(image,
-                                {},
-                                [this, &first_send, socket](const docker::DockerAPI::DockerProgressEvent &progress_ev) {
-                                  if (first_send) {
-                                    send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
-                                    first_send = false;
-                                  }
-                                  auto serialized_ev = rfl::json::write(progress_ev) + "\r\n";
-                                  send_data(socket, serialized_ev);
-                                })) {
-        if (first_send) {
-          send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
-        }
-        auto final_result = rfl::json::write(GenericSuccessResponse{.success = true});
-        send_data(socket, final_result + "\r\n");
-        broadcast_event("DockerPullImageEndEvent",
-                        rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = true}));
-      } else {
-        send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Failed to pull image"}));
-        broadcast_event("DockerPullImageEndEvent",
-                        rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = false}));
-      }
-    }).detach();
-  }
 }
 
 } // namespace wolf::api

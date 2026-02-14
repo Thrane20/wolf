@@ -1,9 +1,9 @@
 #include <api/api.hpp>
+#include <api/dillinger_api.hpp>
 #include <audio/pulse_router.hpp>
 #include <boost/asio.hpp>
 #include <chrono>
 #include <control/control.hpp>
-#include <core/docker.hpp>
 #include <core/gstreamer.hpp>
 #include <csignal>
 #include <exceptions/exceptions.h>
@@ -11,7 +11,6 @@
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
-#include <introspect/introspect.hpp>
 #include <mdns_cpp/logger.hpp>
 #include <mdns_cpp/mdns.hpp>
 #include <memory>
@@ -66,17 +65,6 @@ state::Host get_host_config(std::string_view pkey_filename, std::string_view cer
   std::string host_base_state_folder = local_base_state_folder;
   std::string host_xdg_runtime_dir = utils::get_env("XDG_RUNTIME_DIR", "/tmp/sockets");
 
-  docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
-  if (auto container = introspect::get_current_container(docker_api)) {
-    host_base_state_folder =
-        introspect::get_host_path_for(*container, local_base_state_folder).value_or(local_base_state_folder);
-    host_xdg_runtime_dir =
-        introspect::get_host_path_for(*container, host_xdg_runtime_dir).value_or(host_xdg_runtime_dir);
-  } else {
-    logs::log(logs::warning,
-              "Unable to get the container that is running Wolf, automatic mounts matching is disabled.");
-  }
-
   return {state::DISPLAY_CONFIGURATIONS,
           state::AUDIO_CONFIGURATIONS,
           server_cert,
@@ -118,40 +106,6 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
   auto audio_server = audio::connect();
   if (audio::connected(audio_server)) {
     return {{.server = audio_server}};
-  } else {
-    logs::log(logs::info, "Starting PulseAudio docker container");
-    docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
-    auto pulse_socket = fmt::format("{}/pulse-socket", runtime_dir);
-
-    /* Cleanup old leftovers, Pulse will fail to start otherwise */
-    try {
-      std::filesystem::remove(pulse_socket);
-      std::filesystem::remove_all(fmt::format("{}/pulse", runtime_dir));
-    } catch (const std::filesystem::filesystem_error &e) {
-      logs::log(logs::warning, "Failed to remove old PulseAudio socket: {}", e.what());
-    }
-
-    auto container = docker_api.create(
-        docker::Container{
-            .id = "",
-            .name = "WolfPulseAudio",
-            .image = utils::get_env("WOLF_PULSE_IMAGE", "ghcr.io/games-on-whales/pulseaudio:master"),
-            .status = docker::CREATED,
-            .ports = {},
-            .mounts = {docker::MountPoint{.source = host_runtime_dir, .destination = "/tmp/pulse/", .mode = "rw"}},
-            .env = {"XDG_RUNTIME_DIR=/tmp/pulse/", "UNAME=retro", "UID=1000", "GID=1000"}},
-        // The following is needed when using podman (or any container that uses SELINUX). This way we can access the
-        // socket that is created by PulseAudio from other containers (including this one).
-        R"({
-                  "HostConfig" : {
-                    "SecurityOpt" : ["label=disable"]
-                  }
-            })");
-    if (container && docker_api.start_by_id(container.value().id)) {
-      auto ms = std::stoi(utils::get_env("WOLF_PULSE_CONTAINER_TIMEOUT_MS", "2000"));
-      std::this_thread::sleep_for(std::chrono::milliseconds(ms)); // TODO: Better way of knowing when ready?
-      return {{.server = audio::connect(fmt::format("{}/pulse-socket", runtime_dir)), .container = container}};
-    }
   }
 
   logs::log(logs::warning, "Failed to connect to any PulseAudio server, audio will not be available!");
@@ -165,7 +119,6 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 void run() {
   streaming::init(); // Need to initialise gstreamer once
   control::init();   // Need to initialise enet once
-  docker::init();    // Need to initialise libcurl once
   gst_video_context::init();
 
   auto runtime_dir = utils::get_env("XDG_RUNTIME_DIR", "/tmp/sockets");
@@ -205,6 +158,19 @@ void run() {
   // Wolf API server
   std::thread([local_state, runtime_dir]() { wolf::api::start_server(runtime_dir, local_state); }).detach();
 
+  if (std::string(utils::get_env("DILLINGER_MODE", "")) == "1") {
+    auto api_port = std::stoi(utils::get_env("DILLINGER_API_PORT", "9999"));
+    std::thread([local_state, api_port]() {
+      logs::log(logs::info, "Starting Dillinger API server on port: {}", api_port);
+      wolf::api::DillingerAPI api(local_state);
+      try {
+        api.run(static_cast<unsigned short>(api_port));
+      } catch (const std::exception &ex) {
+        logs::log(logs::error, "Dillinger API thread aborted: {}", ex.what());
+      }
+    }).detach();
+  }
+
   // mDNS
   std::thread([hostname = local_state->config->hostname]() {
     logs::log(logs::info, "Starting mDNS service");
@@ -224,9 +190,14 @@ void run() {
   }).detach();
 
   auto audio_server = setup_audio_server(local_state->host->host_xdg_runtime_dir, runtime_dir);
-  // PulseAudio sink-input router (hostname -> session_id -> virtual_sink_<session>)
-  auto pulse_router_state = std::make_shared<audio::PulseAudioRouterState>(audio_server->server);
-  auto pulse_router_handlers = audio::setup_pulseaudio_router_handlers(local_state, pulse_router_state);
+  std::shared_ptr<audio::PulseAudioRouterState> pulse_router_state;
+  if (audio_server) {
+    // PulseAudio sink-input router (hostname -> session_id -> virtual_sink_<session>)
+    pulse_router_state = std::make_shared<audio::PulseAudioRouterState>(audio_server->server);
+    audio::setup_pulseaudio_router_handlers(local_state, pulse_router_state);
+  } else {
+    logs::log(logs::warning, "[PULSE_ROUTER] Skipping setup, no PulseAudio server available");
+  }
   // Setup event handlers for Moonlight related events (Start/Stop stream, hotplug, etc)
   auto moonlight_sess_handlers = sessions::setup_moonlight_handlers(local_state, runtime_dir, audio_server);
   // Setup event handlers for player Lobbies

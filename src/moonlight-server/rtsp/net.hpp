@@ -16,6 +16,7 @@ namespace rtsp {
 namespace asio = boost::asio;
 using asio::ip::tcp;
 using namespace std::string_view_literals;
+namespace core_events = wolf::core::events;
 
 /**
  * A wrapper on top of the basic boost socket, it'll be in charge of sending and receiving RTSP messages
@@ -54,14 +55,15 @@ public:
     socket_.close();
   }
 
-  static std::optional<events::StreamSession> get_session(const immer::vector<events::StreamSession> &sessions,
-                                                          const RTSP_PACKET &packet,
-                                                          std::string_view user_ip) {
+  static std::optional<core_events::StreamSession> get_session(
+      const immer::vector<core_events::StreamSession> &sessions,
+      const RTSP_PACKET &packet,
+      std::string_view user_ip) {
     std::string host_option = "";
     if (auto host = packet.options.find("Host"); host != packet.options.end()) {
       host_option = host->second;
     }
-    for (const events::StreamSession &session : sessions) {
+    for (const core_events::StreamSession &session : sessions) {
       if (session.rtsp_fake_ip == packet.request.uri.ip || host_option == session.rtsp_fake_ip) {
         logs::log(logs::debug, "[RTSP] found session by matching payload: {}", session.rtsp_fake_ip);
         return session;

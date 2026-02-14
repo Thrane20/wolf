@@ -1,7 +1,6 @@
 #pragma once
 
 #include <core/audio.hpp>
-#include <core/docker.hpp>
 #include <events/events.hpp>
 #include <state/data-structures.hpp>
 
@@ -13,7 +12,6 @@ using namespace wolf::core;
 
 struct AudioServer {
   std::shared_ptr<audio::Server> server;
-  std::optional<docker::Container> container = {};
 };
 
 immer::vector<immer::box<events::EventBusHandlers>>
@@ -41,6 +39,7 @@ struct RunnerArgs {
   const std::string &xdg_runtime_dir;
 
   immer::box<config::ClientSettings> client_settings;
+  immer::map<std::string, std::string> extra_env = {};
 };
 
 /**

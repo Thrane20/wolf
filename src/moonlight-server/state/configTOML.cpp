@@ -1,10 +1,13 @@
 #include <events/events.hpp>
 #include <events/reflectors.hpp>
+#include <filesystem>
 #include <fstream>
+#include <optional>
 #include <gst/gstelementfactory.h>
 #include <gst/gstregistry.h>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
+#include <rfl/json.hpp>
 #include <rfl/toml.hpp>
 #include <state/config.hpp>
 
@@ -28,6 +31,316 @@ void create_default(const std::string &source) {
   out_file << "uuid = \"" << gen_uuid() << "\"" << std::endl;
   out_file << default_toml;
   out_file.close();
+}
+
+static bool is_dillinger_mode() {
+  return std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
+}
+
+static std::optional<GPU_VENDOR> forced_gpu_vendor() {
+  if (!is_dillinger_mode()) {
+    return std::nullopt;
+  }
+
+  auto gpu_type = std::string(utils::get_env("GPU_TYPE", "auto"));
+  if (gpu_type.empty() || gpu_type == "auto") {
+    return std::nullopt;
+  }
+
+  if (gpu_type == "amd") {
+    return GPU_VENDOR::AMD;
+  }
+  if (gpu_type == "nvidia") {
+    return GPU_VENDOR::NVIDIA;
+  }
+  if (gpu_type == "intel") {
+    return GPU_VENDOR::INTEL;
+  }
+
+  logs::log(logs::warning, "Unknown GPU_TYPE '{}', using auto detection", gpu_type);
+  return std::nullopt;
+}
+
+static std::string paired_clients_path(const std::string &config_source) {
+  auto base_dir = std::filesystem::path(config_source).parent_path();
+  return (base_dir / "paired_clients.json").string();
+}
+
+static std::vector<PairedClient> load_paired_clients_file(const std::string &config_source) {
+  auto path = paired_clients_path(config_source);
+  if (!file_exist(path)) {
+  return {};
+  }
+
+  std::ifstream in_file(path);
+  if (!in_file.is_open()) {
+  logs::log(logs::warning, "Failed to open paired clients file: {}", path);
+  return {};
+  }
+
+  std::string contents((std::istreambuf_iterator<char>(in_file)), std::istreambuf_iterator<char>());
+  in_file.close();
+
+  auto parsed = rfl::json::read<std::vector<PairedClient>>(contents);
+  if (!parsed) {
+  logs::log(logs::warning, "Failed to parse paired clients file {}: {}", path, parsed.error().what());
+  return {};
+  }
+  return parsed.value();
+}
+
+static void save_paired_clients_file(const std::string &config_source, const PairedClientList &clients) {
+  auto path = paired_clients_path(config_source);
+  std::vector<PairedClient> client_list = clients | ranges::to<std::vector<PairedClient>>();
+  auto payload = rfl::json::write(client_list);
+
+  std::ofstream out_file(path);
+  if (!out_file.is_open()) {
+  logs::log(logs::warning, "Failed to write paired clients file: {}", path);
+  return;
+  }
+  out_file << payload;
+  out_file.close();
+}
+
+static std::string dillinger_uuid_path(const std::string &config_source) {
+  auto base_dir = std::filesystem::path(config_source).parent_path();
+  return (base_dir / "dillinger_uuid.txt").string();
+}
+
+static std::string load_or_create_dillinger_uuid(const std::string &config_source) {
+  const auto path = dillinger_uuid_path(config_source);
+  try {
+    if (file_exist(path)) {
+      std::ifstream in_file(path);
+      if (in_file.is_open()) {
+        std::string uuid;
+        std::getline(in_file, uuid);
+        in_file.close();
+        if (!uuid.empty()) {
+          return uuid;
+        }
+      }
+    }
+  } catch (...) {
+    // Best-effort; fall back to generating a new UUID.
+  }
+
+  auto uuid = gen_uuid();
+  try {
+    std::ofstream out_file(path);
+    if (out_file.is_open()) {
+      out_file << uuid;
+      out_file.close();
+    }
+  } catch (...) {
+    // ignore
+  }
+
+  return uuid;
+}
+
+static WolfConfig build_dillinger_config(const std::string &config_source) {
+  WolfConfig cfg{};
+  cfg.hostname = "Dillinger";
+  // Keep a stable UUID across restarts so Moonlight clients continue to see the same server.
+  // Pairing persistence is handled separately via paired_clients.json + cert/key files.
+  cfg.uuid = load_or_create_dillinger_uuid(config_source);
+  cfg.config_version = 6;
+
+  BaseApp app{};
+  app.title = "Dillinger";
+  app.start_virtual_compositor = true;
+  app.start_audio_server = true;
+  app.runner = AppCMD{.run_cmd = "/opt/dillinger/dillinger-agent.sh"};
+
+  Profile profile{};
+  profile.id = "moonlight-profile-id";
+  profile.name = "Dillinger";
+  profile.apps = {app};
+
+  cfg.profiles = {profile};
+
+  cfg.gstreamer.video.default_source =
+    "interpipesrc name=interpipesrc_{}_video listen-to={session_id}_video is-live=true "
+    "stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream";
+  cfg.gstreamer.video.default_sink =
+    "rtpmoonlightpay_video name=moonlight_pay "
+    "payload_size={payload_size} fec_percentage={fec_percentage} "
+    "min_required_fec_packets={min_required_fec_packets} !\n"
+    "appsink sync=false name=wolf_udp_sink";
+
+  cfg.gstreamer.video.defaults["nvcodec"] = GstEncoderDefault{
+    .video_params =
+      "cudaupload !\n"
+      "cudaconvertscale add-borders=true !\n"
+      "video/x-raw(memory:CUDAMemory), width={width}, height={height}, "
+      "chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1",
+    .video_params_zero_copy =
+      "cudaupload !\n"
+      "cudaconvertscale add-borders=true !\n"
+      "video/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1"};
+
+  cfg.gstreamer.video.defaults["qsv"] = GstEncoderDefault{
+    .video_params =
+      "videoconvertscale !\n"
+      "video/x-raw, chroma-site={color_range}, width={width}, height={height}, format=NV12, "
+      "colorimetry={color_space}, pixel-aspect-ratio=1/1",
+    .video_params_zero_copy =
+      "vapostproc add-borders=true !\n"
+      "video/x-raw(memory:VAMemory), format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1"};
+
+  cfg.gstreamer.video.defaults["va"] = GstEncoderDefault{
+    .video_params =
+      "vapostproc add-borders=true !\n"
+      "video/x-raw, chroma-site={color_range}, width={width}, height={height}, format=NV12, "
+      "colorimetry={color_space}, pixel-aspect-ratio=1/1",
+    .video_params_zero_copy =
+      "vapostproc add-borders=true !\n"
+      "video/x-raw(memory:VAMemory), format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1"};
+
+  cfg.gstreamer.video.hevc_encoders = {
+    GstEncoder{.plugin_name = "nvcodec",
+         .check_elements = {"nvh265enc", "cudaconvertscale", "cudaupload"},
+         .encoder_pipeline =
+           "nvh265enc gop-size=-1 bitrate={bitrate} aud=false rc-mode=cbr zerolatency=true "
+           "preset=p1 tune=ultra-low-latency multi-pass=two-pass-quarter !\n"
+           "h265parse !\n"
+           "video/x-h265, profile=main, stream-format=byte-stream"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vah265enc", "vapostproc"},
+         .encoder_pipeline =
+           "vah265enc aud=false b-frames=0 ref-frames=1 num-slices={slices_per_frame} "
+           "bitrate={bitrate} cpb-size={bitrate} key-int-max=1024 rate-control=cqp target-usage=6 !\n"
+           "h265parse !\n"
+           "video/x-h265, profile=main, stream-format=byte-stream"},
+    GstEncoder{.plugin_name = "qsv",
+         .check_elements = {"qsvh265enc", "vapostproc"},
+         .encoder_pipeline =
+           "qsvh265enc b-frames=0 gop-size=0 idr-interval=1 ref-frames=1 bitrate={bitrate} "
+           "rate-control=cbr low-latency=1 target-usage=6 !\n"
+           "h265parse !\n"
+           "video/x-h265, profile=main, stream-format=byte-stream"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vah265lpenc", "vapostproc"},
+         .encoder_pipeline =
+           "vah265lpenc aud=false b-frames=0 ref-frames=1 num-slices={slices_per_frame} "
+           "bitrate={bitrate} cpb-size={bitrate} key-int-max=1024 rate-control=cqp target-usage=6 !\n"
+           "h265parse !\n"
+           "video/x-h265, profile=main, stream-format=byte-stream"},
+    GstEncoder{.plugin_name = "x265",
+         .check_elements = {"x265enc"},
+         .video_params =
+           "videoconvertscale !\n"
+           "videorate !\n"
+           "video/x-raw, width={width}, height={height}, framerate={fps}/1, format=I420, "
+           "chroma-site={color_range}, colorimetry={color_space}",
+         .video_params_zero_copy =
+           "videoconvertscale !\n"
+           "videorate !\n"
+             "video/x-raw, width={width}, height={height}, framerate={fps}/1, format=I420, "
+             "chroma-site={color_range}, colorimetry={color_space}",
+         .encoder_pipeline =
+           "x265enc tune=zerolatency speed-preset=superfast bitrate={bitrate} "
+           "option-string=\"info=0:keyint=-1:qp=28:repeat-headers=1:slices={slices_per_frame}:aud=0:"
+           "annexb=1:log-level=3:open-gop=0:bframes=0:intra-refresh=0\" !\n"
+             "video/x-h265, profile=main, stream-format=byte-stream"}};
+
+  cfg.gstreamer.video.h264_encoders = {
+    GstEncoder{.plugin_name = "nvcodec",
+         .check_elements = {"nvh264enc", "cudaconvertscale", "cudaupload"},
+         .encoder_pipeline =
+           "nvh264enc preset=low-latency-hq zerolatency=true gop-size=0 rc-mode=cbr-ld-hq bitrate={bitrate} "
+           "aud=false !\n"
+           "h264parse !\n"
+           "video/x-h264, profile=main, stream-format=byte-stream\\\n"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vah264enc", "vapostproc"},
+         .encoder_pipeline =
+           "vah264enc aud=false b-frames=0 ref-frames=1 num-slices={slices_per_frame} bitrate={bitrate} "
+           "cpb-size={bitrate} key-int-max=1024 rate-control=cqp target-usage=6 !\n"
+           "h264parse !\n"
+           "video/x-h264, profile=main, stream-format=byte-stream\\\n"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vah264lpenc", "vapostproc"},
+         .encoder_pipeline =
+           "vah264lpenc aud=false b-frames=0 ref-frames=1 num-slices={slices_per_frame} bitrate={bitrate} "
+           "cpb-size={bitrate} key-int-max=1024 rate-control=cqp target-usage=6 !\n"
+           "h264parse !\n"
+           "video/x-h264, profile=main, stream-format=byte-stream\\\n"},
+    GstEncoder{.plugin_name = "qsv",
+         .check_elements = {"qsvh264enc", "vapostproc"},
+         .encoder_pipeline =
+           "qsvh264enc b-frames=0 gop-size=0 idr-interval=1 ref-frames=1 bitrate={bitrate} rate-control=cbr "
+           "target-usage=6  !\n"
+           "h264parse !\n"
+           "video/x-h264, profile=main, stream-format=byte-stream\\\n"},
+    GstEncoder{.plugin_name = "x264",
+         .check_elements = {"x264enc"},
+         .encoder_pipeline =
+           "x264enc pass=qual tune=zerolatency speed-preset=superfast b-adapt=false bframes=0 ref=1\n"
+           "sliced-threads=true threads={slices_per_frame} option-string=\"slices={slices_per_frame}:keyint=infinite:open-gop=0\"\n"
+           "b-adapt=false bitrate={bitrate} aud=false !\n"
+           "video/x-h264, profile=high, stream-format=byte-stream\\\n"}};
+
+  cfg.gstreamer.video.av1_encoders = {
+    GstEncoder{.plugin_name = "nvcodec",
+         .check_elements = {"nvav1enc", "cudaconvertscale", "cudaupload"},
+         .encoder_pipeline =
+           "nvav1enc gop-size=-1 bitrate={bitrate} rc-mode=cbr zerolatency=true preset=p1 "
+           "tune=ultra-low-latency multi-pass=two-pass-quarter !\n"
+           "av1parse !\n"
+           "video/x-av1, stream-format=obu-stream, alignment=frame, profile=main\\\n"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vaav1enc", "vapostproc"},
+         .encoder_pipeline =
+           "vaav1enc ref-frames=1 bitrate={bitrate} cpb-size={bitrate} key-int-max=1024 rate-control=cqp "
+           "target-usage=6 !\n"
+           "av1parse !\n"
+           "video/x-av1, stream-format=obu-stream, alignment=frame, profile=main\\\n"},
+    GstEncoder{.plugin_name = "va",
+         .check_elements = {"vaav1lpenc", "vapostproc"},
+         .encoder_pipeline =
+           "vaav1lpenc ref-frames=1 bitrate={bitrate} cpb-size={bitrate} key-int-max=1024 rate-control=cqp "
+           "target-usage=6 !\n"
+           "av1parse !\n"
+           "video/x-av1, stream-format=obu-stream, alignment=frame, profile=main\\\n"},
+    GstEncoder{.plugin_name = "qsv",
+         .check_elements = {"qsvav1enc", "vapostproc"},
+         .encoder_pipeline =
+           "qsvav1enc gop-size=0 ref-frames=1 bitrate={bitrate} rate-control=cbr low-latency=1 target-usage=6 !\n"
+           "av1parse !\n"
+           "video/x-av1, stream-format=obu-stream, alignment=frame, profile=main\\\n"},
+    GstEncoder{.plugin_name = "aom",
+         .check_elements = {"av1enc"},
+         .video_params =
+           "videoconvertscale !\n"
+           "videorate !\n"
+           "video/x-raw, width={width}, height={height}, framerate={fps}/1, format=I420,\n"
+           "chroma-site={color_range}, colorimetry={color_space}\\\n",
+         .video_params_zero_copy =
+           "videoconvertscale !\n"
+           "videorate !\n"
+           "video/x-raw, width={width}, height={height}, framerate={fps}/1, format=I420,\n"
+           "chroma-site={color_range}, colorimetry={color_space}\\\n",
+         .encoder_pipeline =
+           "av1enc usage-profile=realtime end-usage=vbr target-bitrate={bitrate} !\n"
+           "av1parse !\n"
+           "video/x-av1, stream-format=obu-stream, alignment=frame, profile=main\\\n"}};
+
+  cfg.gstreamer.audio.default_source =
+    "interpipesrc name=interpipesrc_{}_audio listen-to={session_id}_audio is-live=true "
+    "stream-sync=restart-ts max-bytes=0 max-buffers=3 block=false\\\n";
+  cfg.gstreamer.audio.default_audio_params = "queue max-size-buffers=3 leaky=downstream ! audiorate ! audioconvert";
+  cfg.gstreamer.audio.default_opus_encoder =
+    "opusenc bitrate={bitrate} bitrate-type=cbr frame-size={packet_duration} bandwidth=fullband "
+    "audio-type=restricted-lowdelay max-payload-size=1400\\\n";
+  cfg.gstreamer.audio.default_sink =
+    "rtpmoonlightpay_audio name=moonlight_pay packet_duration={packet_duration} encrypt={encrypt} "
+    "aes_key=\"{aes_key}\" aes_iv=\"{aes_iv}\" !\n"
+    "appsink name=wolf_udp_sink\\\n";
+
+  return cfg;
 }
 
 static Encoder encoder_type(const GstEncoder &settings) {
@@ -209,41 +522,47 @@ parse_apps(const std::vector<BaseApp> &apps,
 Config load_or_default(const std::string &source,
                        const std::shared_ptr<events::EventBusType> &ev_bus,
                        SessionsAtoms running_sessions) {
-  if (!file_exist(source)) {
-    logs::log(logs::warning, "Unable to open config file: {}, creating one using defaults", source);
-    create_default(source);
-  }
-
-  // First check the version of the config file
-  auto base_cfg = rfl::toml::load<BaseConfig, rfl::DefaultIfMissing>(source).value();
-  auto version = base_cfg.config_version.value_or(0);
-  if (version <= 5) {
-    logs::log(logs::warning, "Found old config file, migrating to newer version");
-    std::filesystem::rename(source, source + ".v4.old");
-    auto v4 = toml::parse_file(source + ".v4.old");
-    create_default(source);
-    auto v5 = toml::parse_file(source);
-    // Copy back everything else
-    v5.insert_or_assign("hostname", v4.at("hostname"));
-    v5.insert_or_assign("uuid", v4.at("uuid"));
-    v5.insert_or_assign("paired_clients", v4.at("paired_clients"));
-    // Insert old `apps` into the new `profiles` for the default profile (`user`)
-    auto moonlight_profile = v5["profiles"].as_array()->at(0).as_table();
-    v5.insert_or_assign(
-        "profiles",
-        toml::array{*moonlight_profile, toml::table({{"id", "user"}, {"name", "User"}, {"apps", v4.at("apps")}})});
-    std::ofstream out_file;
-    out_file.open(source);
-    if (!out_file.is_open()) {
-      throw std::runtime_error("Failed to open config file for writing");
+  WolfConfig cfg{};
+  if (is_dillinger_mode()) {
+    cfg = build_dillinger_config(source);
+    cfg.paired_clients = load_paired_clients_file(source);
+  } else {
+    if (!file_exist(source)) {
+      logs::log(logs::warning, "Unable to open config file: {}, creating one using defaults", source);
+      create_default(source);
     }
-    out_file << v5;
-    out_file.close();
-    logs::log(logs::debug, "Migrated config from v4 to v5");
-  }
 
-  // Will throw if the config is invalid
-  auto cfg = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(source).value();
+    // First check the version of the config file
+    auto base_cfg = rfl::toml::load<BaseConfig, rfl::DefaultIfMissing>(source).value();
+    auto version = base_cfg.config_version.value_or(0);
+    if (version <= 5) {
+      logs::log(logs::warning, "Found old config file, migrating to newer version");
+      std::filesystem::rename(source, source + ".v4.old");
+      auto v4 = toml::parse_file(source + ".v4.old");
+      create_default(source);
+      auto v5 = toml::parse_file(source);
+      // Copy back everything else
+      v5.insert_or_assign("hostname", v4.at("hostname"));
+      v5.insert_or_assign("uuid", v4.at("uuid"));
+      v5.insert_or_assign("paired_clients", v4.at("paired_clients"));
+      // Insert old `apps` into the new `profiles` for the default profile (`user`)
+      auto moonlight_profile = v5["profiles"].as_array()->at(0).as_table();
+      v5.insert_or_assign(
+          "profiles",
+          toml::array{*moonlight_profile, toml::table({{"id", "user"}, {"name", "User"}, {"apps", v4.at("apps")}})});
+      std::ofstream out_file;
+      out_file.open(source);
+      if (!out_file.is_open()) {
+        throw std::runtime_error("Failed to open config file for writing");
+      }
+      out_file << v5;
+      out_file.close();
+      logs::log(logs::debug, "Migrated config from v4 to v5");
+    }
+
+    // Will throw if the config is invalid
+    cfg = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(source).value();
+  }
 
   auto default_gst_video_settings = cfg.gstreamer.video;
   auto default_gst_audio_settings = cfg.gstreamer.audio;
@@ -264,7 +583,10 @@ Config load_or_default(const std::string &source,
   auto default_app_render_node = utils::get_env("WOLF_RENDER_NODE", "/dev/dri/renderD128");
   auto default_gst_render_node = utils::get_env("WOLF_ENCODER_NODE", default_app_render_node);
   auto vendor = get_vendor(default_gst_render_node);
-  if (vendor == GPU_VENDOR::UNKNOWN) {
+  if (auto forced_vendor = forced_gpu_vendor()) {
+    vendor = *forced_vendor;
+    logs::log(logs::info, "Overriding GPU vendor to {} via GPU_TYPE", get_vendor_name(vendor));
+  } else if (vendor == GPU_VENDOR::UNKNOWN) {
     logs::log(logs::warning, "Unable to detect GPU vendor, disabling zero copy pipeline.");
     use_zero_copy = false;
   }
@@ -415,10 +737,14 @@ void pair(const Config &cfg, const PairedClient &client) {
     return filtered_clients.push_back(client);
   });
 
-  // Update TOML
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
-  tml.paired_clients.push_back(client);
-  rfl::toml::save(cfg.config_source, tml);
+  if (is_dillinger_mode()) {
+    save_paired_clients_file(cfg.config_source, cfg.paired_clients->load());
+  } else {
+    // Update TOML
+    auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+    tml.paired_clients.push_back(client);
+    rfl::toml::save(cfg.config_source, tml);
+  }
 }
 
 void unpair(const Config &cfg, const PairedClient &client) {
@@ -431,13 +757,17 @@ void unpair(const Config &cfg, const PairedClient &client) {
            | ranges::to<PairedClientList>();                            //
   });
 
-  // Update TOML
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
-  tml.paired_clients.erase(std::remove_if(tml.paired_clients.begin(),
-                                          tml.paired_clients.end(),
-                                          [&client](const auto &v) { return v.client_cert == client.client_cert; }),
-                           tml.paired_clients.end());
-  rfl::toml::save(cfg.config_source, tml);
+  if (is_dillinger_mode()) {
+    save_paired_clients_file(cfg.config_source, cfg.paired_clients->load());
+  } else {
+    // Update TOML
+    auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+    tml.paired_clients.erase(std::remove_if(tml.paired_clients.begin(),
+                                            tml.paired_clients.end(),
+                                            [&client](const auto &v) { return v.client_cert == client.client_cert; }),
+                             tml.paired_clients.end());
+    rfl::toml::save(cfg.config_source, tml);
+  }
 }
 
 void update_client_settings(const Config &cfg, std::size_t client_id, const PairedClient &updated_client) {
@@ -455,19 +785,27 @@ void update_client_settings(const Config &cfg, std::size_t client_id, const Pair
            ranges::to<PairedClientList>();
   });
 
-  // Update the TOML file
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+  if (is_dillinger_mode()) {
+    save_paired_clients_file(cfg.config_source, cfg.paired_clients->load());
+  } else {
+    // Update the TOML file
+    auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
 
-  tml.paired_clients = tml.paired_clients |                         //
-                       ranges::views::transform(update_client_fn) | //
-                       ranges::to<std::vector<PairedClient>>();
+    tml.paired_clients = tml.paired_clients |                         //
+                         ranges::views::transform(update_client_fn) | //
+                         ranges::to<std::vector<PairedClient>>();
 
-  // Save back to file
-  rfl::toml::save(cfg.config_source, tml);
+    // Save back to file
+    rfl::toml::save(cfg.config_source, tml);
+  }
 }
 
 void update_profiles(const Config &cfg, const ProfilesList &profiles) {
   cfg.profiles->store(profiles);
+
+  if (is_dillinger_mode()) {
+    return;
+  }
 
   auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
   tml.profiles = profiles | //

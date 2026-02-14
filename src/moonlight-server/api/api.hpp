@@ -166,13 +166,6 @@ struct GetIconResponse {
   std::string icon_base64;
 };
 
-struct DockerPullImageRequest {
-  std::string image_name;
-};
-
-struct DockerPullImageResponse {
-  bool success = true;
-};
 
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
@@ -222,8 +215,6 @@ private:
 
   void endpoint_UpdateClientSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
-  void endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
-  void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

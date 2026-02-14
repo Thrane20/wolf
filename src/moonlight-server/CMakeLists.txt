@@ -142,8 +142,7 @@ file(GLOB SRC_LIST SRCS
         runners/*.cpp
         sessions/*.cpp
         state/*.cpp
-        streaming/*.cpp
-        introspect/*.cpp)
+        streaming/*.cpp)
 
 if (UNIX AND NOT APPLE)
     message(STATUS "Adding input implementation for LINUX")
