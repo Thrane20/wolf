@@ -161,8 +161,8 @@ void DillingerAPI::register_routes() {
     auto payload = rfl::json::read<LaunchRequest>(read_body(request));
     if (!payload) {
       respond_json(response,
-                  SimpleWeb::StatusCode::client_error_bad_request,
-                  GenericResponse{false, payload.error().what()});
+                   SimpleWeb::StatusCode::client_error_bad_request,
+                   GenericResponse{false, payload.error().what()});
       return;
     }
 
@@ -183,12 +183,12 @@ void DillingerAPI::register_routes() {
     }
 
     app_state_->event_bus->fire_event(
-      immer::box<core_events::StopRunnerEvent>(core_events::StopRunnerEvent{.session_id = session->session_id}));
+        immer::box<core_events::StopRunnerEvent>(core_events::StopRunnerEvent{.session_id = session->session_id}));
     app_state_->event_bus->fire_event(immer::box<core_events::StartRunner>(
-      core_events::StartRunner{.stop_stream_when_over = false,
-                   .runner = runner,
-                   .stream_session = std::make_shared<core_events::StreamSession>(*session),
-                   .extra_env = env_vars.persistent()}));
+        core_events::StartRunner{.stop_stream_when_over = false,
+                                 .runner = runner,
+                                 .stream_session = std::make_shared<core_events::StreamSession>(*session),
+                                 .extra_env = env_vars.persistent()}));
 
     {
       std::lock_guard<std::mutex> lock(state->mutex);
@@ -207,7 +207,7 @@ void DillingerAPI::register_routes() {
     }
 
     app_state_->event_bus->fire_event(
-      immer::box<core_events::StopRunnerEvent>(core_events::StopRunnerEvent{.session_id = session->session_id}));
+        immer::box<core_events::StopRunnerEvent>(core_events::StopRunnerEvent{.session_id = session->session_id}));
 
     {
       std::lock_guard<std::mutex> lock(state->mutex);
@@ -239,14 +239,16 @@ void DillingerAPI::register_routes() {
     auto payload = rfl::json::read<PairAcceptRequest>(read_body(request));
     if (!payload) {
       respond_json(response,
-                  SimpleWeb::StatusCode::client_error_bad_request,
-                  GenericResponse{false, payload.error().what()});
+                   SimpleWeb::StatusCode::client_error_bad_request,
+                   GenericResponse{false, payload.error().what()});
       return;
     }
 
     auto pair_request = app_state_->pairing_atom->load()->find(payload->pair_secret);
     if (!pair_request) {
-      respond_json(response, SimpleWeb::StatusCode::client_error_not_found, GenericResponse{false, "Pair request not found"});
+      respond_json(response,
+                   SimpleWeb::StatusCode::client_error_not_found,
+                   GenericResponse{false, "Pair request not found"});
       return;
     }
 

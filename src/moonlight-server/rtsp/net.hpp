@@ -56,9 +56,7 @@ public:
   }
 
   static std::optional<core_events::StreamSession> get_session(
-      const immer::vector<core_events::StreamSession> &sessions,
-      const RTSP_PACKET &packet,
-      std::string_view user_ip) {
+      const immer::vector<core_events::StreamSession> &sessions, const RTSP_PACKET &packet, std::string_view user_ip) {
     std::string host_option = "";
     if (auto host = packet.options.find("Host"); host != packet.options.end()) {
       host_option = host->second;

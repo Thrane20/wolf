@@ -125,39 +125,39 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
    * Profiles API
    */
 
-    if (!dillinger_mode) {
+  if (!dillinger_mode) {
     state_->http.add(HTTPMethod::GET,
-             "/api/v1/profiles",
-             {
-               .summary = "Get all profiles",
-               .description = "This endpoint returns a list of all profiles.",
-               .response_description = {{200, {.json_schema = rfl::json::to_schema<ProfileListResponse>()}}},
-               .handler = [this](auto req, auto socket) { endpoint_Profiles(req, socket); },
-             });
+                     "/api/v1/profiles",
+                     {
+                         .summary = "Get all profiles",
+                         .description = "This endpoint returns a list of all profiles.",
+                         .response_description = {{200, {.json_schema = rfl::json::to_schema<ProfileListResponse>()}}},
+                         .handler = [this](auto req, auto socket) { endpoint_Profiles(req, socket); },
+                     });
 
     state_->http.add(
-      HTTPMethod::POST,
-      "/api/v1/profiles/add",
-      {
-        .summary = "Create a new profile",
-        .request_description =
-          APIDescription{.json_schema = rfl::json::to_schema<rfl::Reflector<events::Profile>::ReflType>()},
-        .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
-                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
-        .handler = [this](auto req, auto socket) { endpoint_AddProfile(req, socket); },
-      });
+        HTTPMethod::POST,
+        "/api/v1/profiles/add",
+        {
+            .summary = "Create a new profile",
+            .request_description =
+                APIDescription{.json_schema = rfl::json::to_schema<rfl::Reflector<events::Profile>::ReflType>()},
+            .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+            .handler = [this](auto req, auto socket) { endpoint_AddProfile(req, socket); },
+        });
 
     state_->http.add(
-      HTTPMethod::POST,
-      "/api/v1/profiles/remove",
-      {
-        .summary = "Remove a profile",
-        .request_description = APIDescription{.json_schema = rfl::json::to_schema<ProfileRemoveRequest>()},
-        .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
-                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
-        .handler = [this](auto req, auto socket) { endpoint_RemoveProfile(req, socket); },
-      });
-    }
+        HTTPMethod::POST,
+        "/api/v1/profiles/remove",
+        {
+            .summary = "Remove a profile",
+            .request_description = APIDescription{.json_schema = rfl::json::to_schema<ProfileRemoveRequest>()},
+            .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                                     {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+            .handler = [this](auto req, auto socket) { endpoint_RemoveProfile(req, socket); },
+        });
+  }
 
   /**
    * Stream session API

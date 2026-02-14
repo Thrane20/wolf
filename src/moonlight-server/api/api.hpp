@@ -166,7 +166,6 @@ struct GetIconResponse {
   std::string icon_base64;
 };
 
-
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;

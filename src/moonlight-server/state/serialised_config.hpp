@@ -96,8 +96,7 @@ struct BaseApp {
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
   std::optional<bool> start_audio_server;
-    rfl::TaggedUnion<"type", AppCMD> runner =
-      AppCMD{}; // We have to provide a default or rfl::DefaultIfMissing will fail
+  rfl::TaggedUnion<"type", AppCMD> runner = AppCMD{}; // We have to provide a default or rfl::DefaultIfMissing will fail
 };
 
 struct Profile {

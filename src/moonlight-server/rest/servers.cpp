@@ -1,8 +1,8 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <events/events.hpp>
+#include <helpers/utils.hpp>
 #include <immer/atom.hpp>
 #include <immer/map_transient.hpp>
-#include <helpers/utils.hpp>
 #include <rest/endpoints.hpp>
 
 namespace HTTPServers {

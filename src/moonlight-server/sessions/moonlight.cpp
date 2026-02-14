@@ -1,9 +1,9 @@
+#include <atomic>
+#include <helpers/utils.hpp>
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
-#include <helpers/utils.hpp>
 #include <sessions/common.hpp>
-#include <atomic>
 #include <sessions/handlers.hpp>
 #include <state/sessions.hpp>
 #include <streaming/streaming.hpp>
@@ -23,8 +23,8 @@ immer::box<RTPPingType> wait_for_ping(std::shared_ptr<events::EventBusType> ev_b
   auto ping_future = ping_promise->get_future();
   auto ping_set = std::make_shared<std::atomic_bool>(false);
 
-  auto handler =
-      ev_bus->register_handler<immer::box<RTPPingType>>([sess, ping_promise, ping_set](const immer::box<RTPPingType> &ping_ev) {
+  auto handler = ev_bus->register_handler<immer::box<RTPPingType>>(
+      [sess, ping_promise, ping_set](const immer::box<RTPPingType> &ping_ev) {
         // Check if this ping is for our session
         if (sess->rtp_secret_payload == ping_ev->payload || // Secret payload matching
             (!ping_ev->payload.has_value() && ping_ev->client_ip == sess->client_ip &&
@@ -175,7 +175,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
 
           logs::log(logs::debug, "[STREAM_SESSION] Start runner");
-            bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
+          bool dillinger_mode = std::string(utils::get_env("DILLINGER_MODE", "")) == "1";
           session->event_bus->fire_event(immer::box<events::StartRunner>(
               events::StartRunner{.stop_stream_when_over = !dillinger_mode,
                                   .runner = session->app->runner,
